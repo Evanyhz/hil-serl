@@ -72,6 +72,7 @@ class TrainConfig(DefaultTrainingConfig):
         classifier=False,
         has_renderer=False,
         render_camera="mobilebase0_base_sideview",
+        classifier_checkpoint_path=None,
         **env_kwargs,
     ):
         env_options = {
@@ -105,7 +106,7 @@ class TrainConfig(DefaultTrainingConfig):
                 key=jax.random.PRNGKey(0),
                 sample=env.observation_space.sample(),
                 image_keys=self.classifier_keys,
-                checkpoint_path=os.path.abspath("classifier_ckpt/"),
+                checkpoint_path=os.path.abspath(classifier_checkpoint_path or "classifier_ckpt/"),
             )
 
             def reward_func(obs):

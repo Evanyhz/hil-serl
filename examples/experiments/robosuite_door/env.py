@@ -71,7 +71,7 @@ class RobosuiteDoorEnvConfig:
     camera_widths: int = 128
     image_keys: Tuple[str, str] = ("wrist", "side")
     image_size: Tuple[int, int] = (128, 128)
-    handle_z_randomization: float = 0.015
+    handle_z_randomization: float = 0.01
     mobile_base_door_distance: float = 0.90
     mobile_base_yaw: float = 0.5 * np.pi
     mobile_base_lateral_offset: float = 0.0
@@ -644,19 +644,42 @@ class RobosuiteDoorHILSERLEnv(gym.Env):
         torque = _read_mujoco_sensor(self.env, self._ft_torque_sensor_name).astype(np.float32)
         return force, torque
 
+    # def _camera_image_from_obs(self, rs_obs: Dict[str, Any], camera_name: str) -> np.ndarray:
+    #     image_key = f"{camera_name}_image"
+    #     image_h, image_w = self._image_hw()
+    #     if rs_obs is not None and image_key in rs_obs:
+    #         image = rs_obs[image_key]
+    #     else:
+    #         image = self.env.sim.render(camera_name=camera_name, height=image_h, width=image_w)
+    #         image = image[::-1]
+    #     image = np.asarray(image)
+    #     if image.dtype != np.uint8:
+    #         image = np.clip(image, 0, 255).astype(np.uint8)
+    #     if image.shape[-1] > 3:
+    #         image = image[..., :3]
+    #     return np.ascontiguousarray(image)
+
     def _camera_image_from_obs(self, rs_obs: Dict[str, Any], camera_name: str) -> np.ndarray:
         image_key = f"{camera_name}_image"
         image_h, image_w = self._image_hw()
+
         if rs_obs is not None and image_key in rs_obs:
             image = rs_obs[image_key]
         else:
             image = self.env.sim.render(camera_name=camera_name, height=image_h, width=image_w)
-            image = image[::-1]
+
         image = np.asarray(image)
+
+        # MuJoCo / OpenGL offscreen images are read bottom-up relative to
+        # NumPy / OpenCV image coordinates. Flip once here so all downstream
+        # wrist / side observations are human-readable and consistent.
+        image = image[::-1]
+
         if image.dtype != np.uint8:
             image = np.clip(image, 0, 255).astype(np.uint8)
         if image.shape[-1] > 3:
             image = image[..., :3]
+
         return np.ascontiguousarray(image)
 
     def _get_obs(self, rs_obs: Optional[Dict[str, Any]] = None) -> Dict[str, Dict[str, np.ndarray]]:

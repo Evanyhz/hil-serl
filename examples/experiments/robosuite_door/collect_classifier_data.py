@@ -172,7 +172,7 @@ def show_preview(obs, stats, last_action: np.ndarray, last_label: str) -> int:
             f"success {stats['success']} / {SUCCESSES_NEEDED}   failure {stats['failure']} / {FAILURES_NEEDED}",
             "last_action " + np.array2string(last_action, precision=2, suppress_small=True),
             f"last_label {last_label}",
-            "1 success | 0 failure | Backspace reset | Esc/q quit",
+            "+ success | - failure | Backspace reset | Esc/q quit",
         ],
     )
     cv2.imshow("robosuite_door_classifier", frame)
@@ -217,9 +217,9 @@ class Hotkeys:
 
     def on_press(self, key):
         char = getattr(key, "char", None)
-        if char == "1":
+        if char == "+":
             self.label = "success"
-        elif char == "0":
+        elif char == "-":
             self.label = "failure"
         elif char == "q":
             self.quit = True
@@ -232,9 +232,9 @@ class Hotkeys:
         if key < 0:
             return
         key = key & 0xFF
-        if key == ord("1"):
+        if key == ord("+"):
             self.label = "success"
-        elif key == ord("0"):
+        elif key == ord("-"):
             self.label = "failure"
         elif key in (27, ord("q")):
             self.quit = True
