@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Collect transition-level reward-classifier data for robosuite_door."""
+"""Collect transition-level reward-classifier data for robosuite_door.
+
+This collector is intentionally task-specific: it always opens the robosuite
+viewer, always shows the wrist/side classifier preview, and always saves data to
+this experiment folder's classifier_data directory.
+"""
 
 from __future__ import annotations
 
-import argparse
 import copy
 import datetime as dt
 import pickle as pkl
@@ -17,13 +21,25 @@ import numpy as np
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 EXAMPLES_DIR = SCRIPT_DIR.parents[1]
-DEFAULT_OUTPUT_DIR = SCRIPT_DIR / "classifier_data"
+OUTPUT_DIR = SCRIPT_DIR / "classifier_data"
 if str(EXAMPLES_DIR) not in sys.path:
     sys.path.insert(0, str(EXAMPLES_DIR))
 
 from experiments.robosuite_door.config import TrainConfig
 from experiments.robosuite_door.env import unwrap_robosuite_door_env
 
+
+SUCCESSES_NEEDED = 200
+FAILURES_NEEDED = 400
+SAVE_EVERY = 20
+MAX_EPISODE_STEPS = 1000
+
+HAS_RENDERER = True
+RENDER_CAMERA = "mobilebase0_base_sideview"
+PREVIEW_SCALE = 3
+POS_SENSITIVITY = 0.30
+ROT_SENSITIVITY = 0.30
+CONTROL_HZ = 20
 
 OBS_KEYS = {"wrist", "side", "state"}
 TRANSITION_KEYS = {
@@ -50,39 +66,6 @@ FORBIDDEN_KEYS = {
     "handle_to_eef",
     "door_to_eef",
 }
-FALLBACK_KEYS = {
-    "w": (0, 1.0),
-    "s": (0, -1.0),
-    "a": (1, 1.0),
-    "d": (1, -1.0),
-    "r": (2, 1.0),
-    "f": (2, -1.0),
-    "i": (3, 1.0),
-    "k": (3, -1.0),
-    "j": (4, 1.0),
-    "l": (4, -1.0),
-    "u": (5, 1.0),
-    "o": (5, -1.0),
-    "v": (6, 1.0),
-    "c": (6, -1.0),
-}
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument("--successes-needed", type=int, default=200)
-    parser.add_argument("--failures-needed", type=int, default=400)
-    parser.add_argument("--save-every", type=int, default=20)
-    parser.add_argument("--max-episode-steps", type=int, default=300)
-    parser.add_argument("--preview-scale", type=int, default=2)
-    parser.add_argument("--no-display", action="store_true")
-    parser.add_argument("--viewer", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--render-camera", type=str, default="mobilebase0_base_sideview")
-    parser.add_argument("--pos-sensitivity", type=float, default=0.30)
-    parser.add_argument("--rot-sensitivity", type=float, default=0.30)
-    parser.add_argument("--step-scale", type=float, default=0.4)
-    return parser.parse_args()
 
 
 def assert_no_forbidden_keys(value: Any, where: str = "transition") -> None:
@@ -132,14 +115,21 @@ def make_transition(obs, action, next_obs, reward, done) -> dict[str, Any]:
     )
 
 
-def make_env(args: argparse.Namespace):
+def make_current_obs_transition(obs, action=None) -> dict[str, Any]:
+    if action is None:
+        action = np.zeros(7, dtype=np.float32)
+    return make_transition(obs, action, obs, reward=0.0, done=False)
+
+
+def make_env():
     config = TrainConfig()
     env = config.get_environment(
         fake_env=False,
         save_video=False,
         classifier=False,
-        has_renderer=args.viewer,
-        render_camera=args.render_camera,
+        has_renderer=HAS_RENDERER,
+        render_camera=RENDER_CAMERA,
+        max_episode_steps=MAX_EPISODE_STEPS,
     )
     assert set(env.observation_space.spaces.keys()) == OBS_KEYS
     assert env.action_space.shape == (7,), env.action_space.shape
@@ -166,20 +156,20 @@ def draw_text(frame, lines: list[str]):
         y += 18
 
 
-def show_preview(obs, args, stats, last_action: np.ndarray, last_label: str) -> int:
+def show_preview(obs, stats, last_action: np.ndarray, last_label: str) -> int:
     import cv2
 
     wrist = squeeze_rgb(obs, "wrist")
     side = squeeze_rgb(obs, "side")
     frame = cv2.cvtColor(np.concatenate([wrist, side], axis=1), cv2.COLOR_RGB2BGR)
-    if args.preview_scale != 1:
-        frame = cv2.resize(frame, None, fx=args.preview_scale, fy=args.preview_scale, interpolation=cv2.INTER_NEAREST)
+    if PREVIEW_SCALE != 1:
+        frame = cv2.resize(frame, None, fx=PREVIEW_SCALE, fy=PREVIEW_SCALE, interpolation=cv2.INTER_NEAREST)
 
     draw_text(
         frame,
         [
             f"episode {stats['episode']}  step {stats['step']}",
-            f"success {stats['success']} / {args.successes_needed}   failure {stats['failure']} / {args.failures_needed}",
+            f"success {stats['success']} / {SUCCESSES_NEEDED}   failure {stats['failure']} / {FAILURES_NEEDED}",
             "last_action " + np.array2string(last_action, precision=2, suppress_small=True),
             f"last_label {last_label}",
             "1 success | 0 failure | Backspace reset | Esc/q quit",
@@ -187,19 +177,6 @@ def show_preview(obs, args, stats, last_action: np.ndarray, last_label: str) -> 
     )
     cv2.imshow("robosuite_door_classifier", frame)
     return cv2.waitKey(1)
-
-
-def fallback_action(key: int, step_scale: float) -> np.ndarray:
-    action = np.zeros(7, dtype=np.float32)
-    if key < 0:
-        return action
-    if key in (ord(" "), ord("z"), ord("Z")):
-        return action
-    char = chr(key & 0xFF).lower()
-    if char in FALLBACK_KEYS:
-        index, sign = FALLBACK_KEYS[char]
-        action[index] = sign * step_scale
-    return np.clip(action, -1.0, 1.0)
 
 
 def device_action(device) -> np.ndarray | None:
@@ -223,21 +200,20 @@ def device_action(device) -> np.ndarray | None:
 
 
 class Hotkeys:
-    def __init__(self, enabled: bool = True):
+    def __init__(self):
         self.label = None
         self.reset = False
         self.quit = False
         self.listener = None
         self.Key = None
-        if enabled:
-            try:
-                from pynput import keyboard
+        try:
+            from pynput import keyboard
 
-                self.Key = keyboard.Key
-                self.listener = keyboard.Listener(on_press=self.on_press)
-                self.listener.start()
-            except Exception as exc:
-                print(f"label hotkeys disabled: {exc}")
+            self.Key = keyboard.Key
+            self.listener = keyboard.Listener(on_press=self.on_press)
+            self.listener.start()
+        except Exception as exc:
+            raise RuntimeError(f"label hotkeys unavailable: {exc}") from exc
 
     def on_press(self, key):
         char = getattr(key, "char", None)
@@ -275,26 +251,24 @@ class Hotkeys:
             self.listener.stop()
 
 
-def save_buffers(successes, failures, output_dir: Path, stamp: str) -> tuple[Path, Path]:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    success_path = output_dir / f"robosuite_door_success_images_{stamp}.pkl"
-    failure_path = output_dir / f"robosuite_door_failure_images_{stamp}.pkl"
+def save_buffers(successes, failures, stamp: str) -> tuple[Path, Path]:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    success_path = OUTPUT_DIR / f"robosuite_door_success_images_{stamp}.pkl"
+    failure_path = OUTPUT_DIR / f"robosuite_door_failure_images_{stamp}.pkl"
     for path, data in ((success_path, successes), (failure_path, failures)):
         with path.open("wb") as f:
             pkl.dump([sanitize_transition(t) for t in data], f)
     return success_path, failure_path
 
 
-def make_device(args, rs_env):
-    if not args.viewer:
-        return None
+def make_device(rs_env):
     try:
         from robosuite.devices import Keyboard
 
         device = Keyboard(
             env=rs_env,
-            pos_sensitivity=args.pos_sensitivity,
-            rot_sensitivity=args.rot_sensitivity,
+            pos_sensitivity=POS_SENSITIVITY,
+            rot_sensitivity=ROT_SENSITIVITY,
         )
         viewer = getattr(rs_env, "viewer", None)
         if viewer is not None and hasattr(viewer, "add_keypress_callback"):
@@ -302,27 +276,31 @@ def make_device(args, rs_env):
         device.start_control()
         return device
     except Exception as exc:
-        print(f"robosuite Keyboard unavailable, using OpenCV fallback controls: {exc}")
-        return None
+        raise RuntimeError(f"robosuite Keyboard unavailable: {exc}") from exc
 
 
-def print_counts(successes, failures, args):
-    print(f"success transitions: {len(successes)} / {args.successes_needed}")
-    print(f"failure transitions: {len(failures)} / {args.failures_needed}")
+def print_counts(successes, failures):
+    print(f"success transitions: {len(successes)} / {SUCCESSES_NEEDED}")
+    print(f"failure transitions: {len(failures)} / {FAILURES_NEEDED}")
 
 
-def targets_reached(successes, failures, args) -> bool:
-    return len(successes) >= args.successes_needed and len(failures) >= args.failures_needed
+def targets_reached(successes, failures) -> bool:
+    return len(successes) >= SUCCESSES_NEEDED and len(failures) >= FAILURES_NEEDED
+
+
+def reset_episode(env, device, episode: int):
+    obs, _ = env.reset()
+    sanitize_observation(obs)
+    device.start_control()
+    return obs, episode + 1, 0
 
 
 def main() -> None:
-    args = parse_args()
-    args.output_dir = args.output_dir.expanduser()
-    env = make_env(args)
+    env = make_env()
     door_env = unwrap_robosuite_door_env(env)
     rs_env = door_env.get_robosuite_env()
-    device = make_device(args, rs_env)
-    hotkeys = Hotkeys(enabled=not (args.no_display and not args.viewer))
+    device = make_device(rs_env)
+    hotkeys = Hotkeys()
 
     successes, failures = [], []
     stamp = dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -330,94 +308,80 @@ def main() -> None:
     sanitize_observation(obs)
     print("obs keys:", sorted(obs.keys()))
     print("action shape:", env.action_space.shape)
-    print("output dir:", args.output_dir)
+    print("output dir:", OUTPUT_DIR)
 
-    if args.no_display and not args.viewer:
-        env.close()
-        return
+    import cv2
+
+    cv2.namedWindow("robosuite_door_classifier", cv2.WINDOW_NORMAL)
 
     episode, step = 1, 0
     last_action = np.zeros(7, dtype=np.float32)
     last_label = "none"
-    current_transition = None
     pending_reset = False
 
     try:
-        while not targets_reached(successes, failures, args):
+        while not targets_reached(successes, failures):
+            if pending_reset:
+                obs, episode, step = reset_episode(env, device, episode)
+                pending_reset = False
+                continue
+
             frame_start = time.time()
-            cv_key = -1
-            if not args.no_display:
-                cv_key = show_preview(
-                    obs,
-                    args,
-                    {"episode": episode, "step": step, "success": len(successes), "failure": len(failures)},
-                    last_action,
-                    last_label,
-                )
-                hotkeys.update_from_cv_key(cv_key)
+            cv_key = show_preview(
+                obs,
+                {"episode": episode, "step": step, "success": len(successes), "failure": len(failures)},
+                last_action,
+                last_label,
+            )
+            hotkeys.update_from_cv_key(cv_key)
 
             label, reset, quit_now = hotkeys.pop()
-            if label is not None:
-                if current_transition is None:
-                    print("no transition to save yet")
-                elif label == "success":
-                    successes.append(sanitize_transition(current_transition))
-                    last_label = "success"
-                    print_counts(successes, failures, args)
-                else:
-                    failures.append(sanitize_transition(current_transition))
-                    last_label = "failure"
-                    print_counts(successes, failures, args)
+            if label == "success":
+                successes.append(make_current_obs_transition(obs, last_action))
+                last_label = "success"
+                print_counts(successes, failures)
+            elif label == "failure":
+                failures.append(make_current_obs_transition(obs, last_action))
+                last_label = "failure"
+                print_counts(successes, failures)
 
-                total = len(successes) + len(failures)
-                if args.save_every > 0 and total > 0 and total % args.save_every == 0:
-                    paths = save_buffers(successes, failures, args.output_dir, stamp)
-                    print(f"autosaved: {paths[0]}  {paths[1]}")
+            total = len(successes) + len(failures)
+            if label is not None and SAVE_EVERY > 0 and total > 0 and total % SAVE_EVERY == 0:
+                paths = save_buffers(successes, failures, stamp)
+                print(f"autosaved: {paths[0]}  {paths[1]}")
 
             if quit_now:
                 break
 
-            if reset or pending_reset:
-                obs, _ = env.reset()
-                sanitize_observation(obs)
-                if device is not None:
-                    device.start_control()
-                episode += 1
-                step = 0
-                current_transition = None
-                pending_reset = False
+            if reset:
+                pending_reset = True
                 continue
 
-            action = device_action(device) if device is not None else fallback_action(cv_key, args.step_scale)
+            action = device_action(device)
             if action is None:
                 pending_reset = True
                 continue
 
-            next_obs, reward, done, truncated, _ = env.step(action)
-            if args.viewer and rs_env is not None:
-                rs_env.render()
+            next_obs, _, done, truncated, _ = env.step(action)
+            rs_env.render()
+            sanitize_observation(next_obs)
 
-            terminal = bool(done or truncated)
-            current_transition = make_transition(obs, action, next_obs, reward, terminal)
             last_action = action.copy()
             obs = next_obs
             step += 1
-            pending_reset = terminal or step >= args.max_episode_steps
+            pending_reset = bool(done or truncated or step >= MAX_EPISODE_STEPS)
 
-            sleep_time = max(0.0, 1.0 / 20.0 - (time.time() - frame_start))
+            sleep_time = max(0.0, 1.0 / CONTROL_HZ - (time.time() - frame_start))
             time.sleep(sleep_time)
     finally:
-        success_path, failure_path = save_buffers(successes, failures, args.output_dir, stamp)
+        success_path, failure_path = save_buffers(successes, failures, stamp)
         print(f"saved: {success_path}")
         print(f"saved: {failure_path}")
         hotkeys.close()
-        if not args.no_display:
-            try:
-                import cv2
-
-                cv2.destroyAllWindows()
-            except Exception:
-                pass
+        try:
+            cv2.destroyAllWindows()
+        except Exception:
+            pass
         env.close()
 
 
